@@ -410,13 +410,15 @@ contract BEP714Test is Test {
         assertEq(validators.getIncoming(validator), 0);
     }
 
-    function testLoweredFelonyThresholdDoesNotWaitForMultiple() public {
+    function testLoweredFelonyThresholdWaitsForNextMultiple() public {
         address validator = members[0];
         _param(address(validators), "maxNumOfMaintaining", 0);
         _param(address(slash), "felonyThreshold", 1000);
         _miss(validator, 650);
         _param(address(slash), "felonyThreshold", 600);
-        _miss(validator, 1);
+        _miss(validator, 1); // 651: not retroactive, no felony
+        assertTrue(validators.isCurrentValidator(validator));
+        _miss(validator, 549); // 1200
         assertEq(_count(validator), 0);
         assertFalse(validators.isCurrentValidator(validator));
     }

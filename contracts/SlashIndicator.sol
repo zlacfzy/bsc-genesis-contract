@@ -126,12 +126,13 @@ contract SlashIndicator is ISlashIndicator, System, IParamSubscriber, IApplicati
         }
         indicator.height = block.number;
         uint256 count = indicator.count;
-        if (count >= felonyThreshold) {
+        bool isFelony = count % felonyThreshold == 0;
+        if (isFelony) {
             indicator.count = 0;
         }
         // the validator contract snapshots the count when it enters maintenance below, so store it first
         indicators[validator] = indicator;
-        if (count >= felonyThreshold) {
+        if (isFelony) {
             IBSCValidatorSet(VALIDATOR_CONTRACT_ADDR).felony(validator);
             _downtimeSlash(validator, indicator.count, false);
         } else if (count % misdemeanorThreshold == 0) {
