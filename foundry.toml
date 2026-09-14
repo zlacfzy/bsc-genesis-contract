@@ -3,7 +3,7 @@ src = 'contracts'
 test = 'test'
 script = 'foundry-script'
 out = 'out'
-fs_permissions = [{ access = "read-write", path = "./out" }, { access = "read", path = "./test/fixtures/bep714" }]
+fs_permissions = [{ access = "read-write", path = "./out" }]
 libs = ['lib', 'node_modules']
 remappings = [
     'ds-test/=lib/forge-std/lib/ds-test/src/',

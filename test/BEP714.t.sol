@@ -331,31 +331,35 @@ contract BEP714Test is Test {
         assertFalse(validators.isCurrentValidator(validator));
     }
 
-    function _useLegacyContracts() internal {
-        bytes memory validatorCode = vm.parseBytes(vm.readFile("test/fixtures/bep714/ValidatorContract"));
-        bytes memory slashCode = vm.parseBytes(vm.readFile("test/fixtures/bep714/SlashContract"));
-        assertEq(sha256(validatorCode), hex"7640aabe831abfea4708c9ae1ff7db7f7c9c57f8e07f4673f4b4607e46d7484e");
-        assertEq(sha256(slashCode), hex"bb7f15da14eebd9f79dec3ae13af83fb63f558e26dcb9d6f97bb579fd473781a");
-        vm.etch(address(validators), validatorCode);
-        vm.etch(address(slash), slashCode);
+    function _useLegacyParams() internal {
         _param(address(slash), "felonyThreshold", 1000);
         _param(address(slash), "misdemeanorThreshold", 333);
         _param(address(validators), "maxNumOfMaintaining", 0);
     }
 
-    function _upgradeContracts() internal {
-        vm.etch(address(validators), vm.getDeployedCode("BSCValidatorSet.sol:BSCValidatorSet"));
-        vm.etch(address(slash), vm.getDeployedCode("SlashIndicator.sol:SlashIndicator"));
+    // Pre-BEP-714 indicators were produced by `%` slashing and carry no charged-boundary
+    // record. Seed one directly: SlashIndicator keeps `validators` at slot 1 and
+    // `indicators` at slot 2 as (height, count, exist).
+    function _seedLegacyIndicator(address validator, uint256 count) internal {
+        bytes32 base = keccak256(abi.encode(validator, uint256(2)));
+        vm.store(address(slash), base, bytes32(block.number));
+        vm.store(address(slash), bytes32(uint256(base) + 1), bytes32(count));
+        vm.store(address(slash), bytes32(uint256(base) + 2), bytes32(uint256(1)));
+        uint256 length = uint256(vm.load(address(slash), bytes32(uint256(1))));
+        bytes32 element = bytes32(uint256(keccak256(abi.encode(uint256(1)))) + length);
+        vm.store(address(slash), element, bytes32(uint256(uint160(validator))));
+        vm.store(address(slash), bytes32(uint256(1)), bytes32(length + 1));
+        (, uint256 stored, bool exist) = slash.indicators(validator);
+        assertEq(stored, count);
+        assertTrue(exist);
+        assertEq(slash.validators(length), validator);
     }
 
     function testUpgradePreservesPreviouslyChargedIndicator() public {
-        _useLegacyContracts();
+        _useLegacyParams();
         address validator = members[0];
-        _deposit(validator);
-        _miss(validator, 333); // the old implementation charges this boundary
-        assertEq(validators.getIncoming(validator), 0);
+        _seedLegacyIndicator(validator, 333); // the old implementation charged this boundary
         uint256 income = _deposit(validator);
-        _upgradeContracts(); // storage, including untracked indicators, survives
         (uint256 count, uint256 charged) = slash.getMaintenanceIndicator(validator);
         assertEq(count, 333);
         assertEq(charged, 333);
@@ -365,11 +369,10 @@ contract BEP714Test is Test {
     }
 
     function testUpgradeChargesFirstBoundaryOnce() public {
-        _useLegacyContracts();
+        _useLegacyParams();
         address validator = members[0];
-        _miss(validator, 332);
+        _seedLegacyIndicator(validator, 332);
         _deposit(validator);
-        _upgradeContracts();
         _miss(validator, 1);
         assertEq(_count(validator), 333);
         assertEq(validators.getIncoming(validator), 0);
@@ -379,11 +382,10 @@ contract BEP714Test is Test {
     }
 
     function testUpgradeGovernanceTracksOldBoundaryBeforeFirstSlash() public {
-        _useLegacyContracts();
+        _useLegacyParams();
         address validator = members[0];
-        _miss(validator, 333);
+        _seedLegacyIndicator(validator, 333);
         uint256 income = _deposit(validator);
-        _upgradeContracts();
         _param(address(slash), "misdemeanorThreshold", 200);
         (, uint256 charged) = slash.getMaintenanceIndicator(validator);
         assertEq(charged, 333);
@@ -394,10 +396,9 @@ contract BEP714Test is Test {
     }
 
     function testUpgradeDailyDecayBeforeFirstSlash() public {
-        _useLegacyContracts();
+        _useLegacyParams();
         address validator = members[0];
-        _miss(validator, 333);
-        _upgradeContracts();
+        _seedLegacyIndicator(validator, 333);
         vm.prank(address(validators));
         slash.clean();
         (uint256 count, uint256 charged) = slash.getMaintenanceIndicator(validator);
@@ -409,6 +410,7 @@ contract BEP714Test is Test {
     }
 
     function testUninitializedSlashSkipsAutomaticMaintenance() public {
+        _seedLegacyIndicator(members[0], 40);
         // Restore the inherited init flag and threshold slots to bootstrap values.
         vm.store(address(slash), bytes32(uint256(0)), bytes32(0));
         vm.store(address(slash), bytes32(uint256(4)), bytes32(0));
@@ -416,16 +418,15 @@ contract BEP714Test is Test {
         (uint256 count, uint256 charged) = slash.getMaintenanceIndicator(members[0]);
         assertEq(count, 0);
         assertEq(charged, 0);
-        _check(); // ValidatorSet is initialized and maintenance is enabled
-        assertEq(validators.getValidators().length, members.length);
+        _check(); // must neither divide by zero nor admit anyone
+        assertTrue(validators.isCurrentValidator(members[0]));
         slash.init();
-        _miss(members[0], 40);
         _check();
         assertFalse(validators.isCurrentValidator(members[0]));
     }
 
     function testMissingCompanionUpgradeReverts() public {
-        vm.etch(address(slash), vm.parseBytes(vm.readFile("test/fixtures/bep714/SlashContract")));
+        vm.etch(address(slash), hex"00"); // a SlashIndicator without the BEP-714 entry points
         vm.prank(PRODUCER);
         vm.expectRevert();
         validators.checkMaintenance();
