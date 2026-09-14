@@ -568,14 +568,19 @@ contract BSCValidatorSet is IBSCValidatorSet, System, IParamSubscriber, IApplica
             validators[j] = validator;
         }
         uint256 threshold = ISlashIndicator(SLASH_CONTRACT_ADDR).maintenanceThreshold();
+        uint256 workingValidatorCount = validators.length;
         for (uint256 i; i < validators.length; ++i) {
+            if (workingValidatorCount <= 1) {
+                break;
+            }
             uint256 index = currentValidatorSetMap[validators[i]] - 1;
-            if (!canEnterMaintenance(index)) {
+            if (!_canEnterMaintenance(index)) {
                 continue;
             }
             (uint256 count,) = ISlashIndicator(SLASH_CONTRACT_ADDR).getMaintenanceIndicator(validators[i]);
             if (count >= threshold) {
                 _enterMaintenance(validators[i], index);
+                --workingValidatorCount;
             }
         }
     }
@@ -584,6 +589,12 @@ contract BSCValidatorSet is IBSCValidatorSet, System, IParamSubscriber, IApplica
      * @notice Return whether the validator at index could enter maintenance
      */
     function canEnterMaintenance(uint256 index) public view returns (bool) {
+        return _canEnterMaintenance(index) && getValidators().length > 1;
+    }
+
+    // Epoch admission maintains the working count locally instead of rescanning
+    // the full set for each validator. Other callers use canEnterMaintenance.
+    function _canEnterMaintenance(uint256 index) private view returns (bool) {
         if (index >= currentValidatorSet.length) {
             return false;
         }
@@ -595,7 +606,6 @@ contract BSCValidatorSet is IBSCValidatorSet, System, IParamSubscriber, IApplica
                 || !isWorkingValidator(index) // - 3. check if not working(not jailed and not maintaining)
                 || validatorExtraSet[index].enterMaintenanceHeight > 0 // - 5. check if has Maintained during current 24-hour period
                     // current validators are selected every 24 hours(from 00:00:00 UTC to 23:59:59 UTC)
-                || getValidators().length <= 1 // - 6. check num of remaining working validators
         ) {
             return false;
         }

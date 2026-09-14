@@ -158,6 +158,11 @@ contract SlashIndicator is ISlashIndicator, System, IParamSubscriber, IApplicati
     function getMaintenanceIndicator(
         address validator
     ) public view override returns (uint256 count, uint256 chargedCount) {
+        // Private-chain bootstrap may initialize ValidatorSet first. Report no
+        // misses until SlashIndicator is initialized so epoch admission is a no-op.
+        if (misdemeanorThreshold == 0) {
+            return (0, 0);
+        }
         count = indicators[validator].count;
         chargedCount = _misdemeanorTracked[validator]
             ? _lastMisdemeanorCount[validator]
@@ -171,6 +176,11 @@ contract SlashIndicator is ISlashIndicator, System, IParamSubscriber, IApplicati
     ) external override onlyValidatorContract onlyInit returns (bool chargeMisdemeanor) {
         chargeMisdemeanor = count / misdemeanorThreshold > chargedCount / misdemeanorThreshold;
         if (count >= felonyThreshold) {
+            // A manual maintenance session can reach felony without ever
+            // acquiring an ordinary indicator. Do not enqueue an empty record.
+            if (!indicators[validator].exist) {
+                return false;
+            }
             count = 0;
             chargedCount = 0;
             chargeMisdemeanor = false;
@@ -431,6 +441,9 @@ contract SlashIndicator is ISlashIndicator, System, IParamSubscriber, IApplicati
                 "the misdemeanorThreshold out of range"
             );
             // Preserve already charged boundaries under the old parameter.
+            // Only validator slashing/maintenance can enqueue these records;
+            // daily clean removes zero/decayed counts. Historical sets may still
+            // be represented, so this is not capped at the current set's size.
             for (uint256 i; i < validators.length; ++i) {
                 _trackMisdemeanor(validators[i]);
             }
