@@ -580,12 +580,23 @@ contract BSCValidatorSet is IBSCValidatorSet, System, IParamSubscriber, IApplica
                 || !isWorkingValidator(index) // - 3. check if not working(not jailed and not maintaining)
                 || validatorExtraSet[index].enterMaintenanceHeight > 0 // - 5. check if has Maintained during current 24-hour period
                     // current validators are selected every 24 hours(from 00:00:00 UTC to 23:59:59 UTC)
-                || getValidators().length <= 1 // - 6. check num of remaining working validators
+                || !_hasOtherWorkingValidator(index) // - 6. check num of remaining working validators
         ) {
             return false;
         }
 
         return true;
+    }
+
+    // stop at the first other working validator instead of scanning the whole set twice
+    function _hasOtherWorkingValidator(uint256 index) private view returns (bool) {
+        uint256 n = currentValidatorSet.length;
+        for (uint256 i; i < n; ++i) {
+            if (i != index && isWorkingValidator(i)) {
+                return true;
+            }
+        }
+        return false;
     }
 
     /**
@@ -1091,6 +1102,7 @@ contract BSCValidatorSet is IBSCValidatorSet, System, IParamSubscriber, IApplica
                 ISlashIndicator(SLASH_CONTRACT_ADDR).settleMaintenance(validator, slashCount);
             }
             // ordinary slashing has charged every multiple of misdemeanorThreshold up to the entry count
+            // since the last reset, so only a newly entered interval is charged here
             if (slashCount / misdemeanorThreshold > entryCount / misdemeanorThreshold) {
                 _misdemeanor(validator);
             }

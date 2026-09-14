@@ -349,6 +349,35 @@ contract BEP714Test is Test {
         assertFalse(validators.isCurrentValidator(validator));
     }
 
+    function testTwoSessionsAcrossDailyBoundary() public {
+        address validator = members[0];
+        _miss(validator, 40);
+        _advanceMaintenance(validator, 160);
+        _forceDailyUpdate(); // 200 settled and charged, then decayed to 50
+        _deposit(validator);
+        _miss(validator, 1); // 51: admitted again, snapshot overwritten
+        assertFalse(validators.isCurrentValidator(validator));
+        _advanceMaintenance(validator, 149); // 51 + 149 = 200 crosses a boundary again after decay
+        _exit(validator);
+        assertEq(_count(validator), 200);
+        assertEq(validators.getIncoming(validator), 0);
+    }
+
+    function testFelonyShiftKeepsSnapshotWithValidator() public {
+        address maintaining = members[1];
+        address felon = members[0];
+        _deposit(maintaining);
+        _miss(maintaining, 40); // snapshot stored at index 1
+        _param(address(validators), "maxNumOfMaintaining", 0);
+        _miss(felon, 600); // felony removes index 0 and shifts the maintaining validator down
+        assertFalse(validators.isCurrentValidator(felon));
+        assertEq(validators.getCurrentValidatorIndex(maintaining), 0);
+        _advanceMaintenance(maintaining, 160);
+        _exit(maintaining);
+        assertEq(_count(maintaining), 200); // 40 + 160, the snapshot moved with the record
+        assertEq(validators.getIncoming(maintaining), 0);
+    }
+
     /*----------------- governance -----------------*/
 
     function testGovernanceBoundsAndAuthorization() public {
@@ -427,6 +456,31 @@ contract BEP714Test is Test {
         uint256 income = _deposit(validator);
         _miss(validator, 1);
         assertEq(validators.getIncoming(validator), income);
+    }
+
+    function testRaisedMisdemeanorThresholdDuringMaintenance() public {
+        address validator = members[0];
+        _deposit(validator);
+        _miss(validator, 40);
+        _param(address(slash), "misdemeanorThreshold", 300);
+        _advanceMaintenance(validator, 259); // 299 / 300 == 40 / 300
+        uint256 income = validators.getIncoming(validator);
+        _advanceMaintenance(validator, 260); // 300 / 300 > 40 / 300
+        _exit(validator);
+        assertEq(_count(validator), 300);
+        assertEq(validators.getIncoming(validator), 0);
+        assertGt(income, 0);
+    }
+
+    function testLoweredFelonyThresholdBelowActiveSessionTotal() public {
+        address validator = members[0];
+        _param(address(slash), "felonyThreshold", 1000);
+        _miss(validator, 40);
+        _advanceMaintenance(validator, 660); // total 700, below 1000
+        _param(address(slash), "felonyThreshold", 600);
+        _exit(validator); // thresholds are read at settlement
+        assertFalse(validators.isCurrentValidator(validator));
+        assertEq(_count(validator), 0);
     }
 
     /*----------------- pre-upgrade indicators -----------------*/
