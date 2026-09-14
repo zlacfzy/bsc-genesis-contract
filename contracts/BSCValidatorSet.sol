@@ -90,7 +90,7 @@ contract BSCValidatorSet is IBSCValidatorSet, System, IParamSubscriber, IApplica
         bool isMaintaining;
         // BEP-126 Fast Finality
         bytes voteAddress;
-        // reserve for future use
+        // reserve for future use; slots[0..1] hold the BEP-714 maintenance entry snapshot
         uint256[19] slots;
     }
 

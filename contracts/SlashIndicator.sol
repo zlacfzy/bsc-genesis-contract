@@ -174,7 +174,6 @@ contract SlashIndicator is ISlashIndicator, System, IParamSubscriber, IApplicati
         uint256 count,
         uint256 chargedCount
     ) external override onlyValidatorContract onlyInit returns (bool chargeMisdemeanor) {
-        chargeMisdemeanor = count / misdemeanorThreshold > chargedCount / misdemeanorThreshold;
         if (count >= felonyThreshold) {
             // A manual maintenance session can reach felony without ever
             // acquiring an ordinary indicator. Do not enqueue an empty record.
@@ -183,8 +182,8 @@ contract SlashIndicator is ISlashIndicator, System, IParamSubscriber, IApplicati
             }
             count = 0;
             chargedCount = 0;
-            chargeMisdemeanor = false;
-        } else if (chargeMisdemeanor) {
+        } else if (count / misdemeanorThreshold > chargedCount / misdemeanorThreshold) {
+            chargeMisdemeanor = true;
             chargedCount = count;
         }
         if (!indicators[validator].exist) {
@@ -209,6 +208,26 @@ contract SlashIndicator is ISlashIndicator, System, IParamSubscriber, IApplicati
         }
     }
 
+    // Decrease the indicator by felonyThreshold/DECREASE_RATE. Returns false when the
+    // count is too small to survive, in which case the caller removes the record.
+    function _decayIndicator(address validator) private returns (bool) {
+        Indicator memory indicator = indicators[validator];
+        if (indicator.count <= felonyThreshold / DECREASE_RATE) {
+            return false;
+        }
+        _trackMisdemeanor(validator);
+        indicator.count = indicator.count - felonyThreshold / DECREASE_RATE;
+        indicators[validator] = indicator;
+        _decayMisdemeanor(validator, indicator.count);
+        return true;
+    }
+
+    function _deleteIndicator(address validator) private {
+        delete indicators[validator];
+        delete _lastMisdemeanorCount[validator];
+        delete _misdemeanorTracked[validator];
+    }
+
     // To prevent validator misbehaving and leaving, do not clean slash record to zero, but decrease by felonyThreshold/DECREASE_RATE .
     // Clean is an effective implement to reorganize "validators" and "indicators".
     function clean() external override(ISlashIndicator) onlyValidatorContract onlyInit {
@@ -221,30 +240,17 @@ contract SlashIndicator is ISlashIndicator, System, IParamSubscriber, IApplicati
             bool findLeft = false;
             bool findRight = false;
             for (; i < j; ++i) {
-                Indicator memory leftIndicator = indicators[validators[i]];
-                if (leftIndicator.count > felonyThreshold / DECREASE_RATE) {
-                    _trackMisdemeanor(validators[i]);
-                    leftIndicator.count = leftIndicator.count - felonyThreshold / DECREASE_RATE;
-                    indicators[validators[i]] = leftIndicator;
-                    _decayMisdemeanor(validators[i], leftIndicator.count);
-                } else {
+                if (!_decayIndicator(validators[i])) {
                     findLeft = true;
                     break;
                 }
             }
             for (; i <= j; --j) {
-                Indicator memory rightIndicator = indicators[validators[j]];
-                if (rightIndicator.count > felonyThreshold / DECREASE_RATE) {
-                    _trackMisdemeanor(validators[j]);
-                    rightIndicator.count = rightIndicator.count - felonyThreshold / DECREASE_RATE;
-                    indicators[validators[j]] = rightIndicator;
-                    _decayMisdemeanor(validators[j], rightIndicator.count);
+                if (_decayIndicator(validators[j])) {
                     findRight = true;
                     break;
                 } else {
-                    delete indicators[validators[j]];
-                    delete _lastMisdemeanorCount[validators[j]];
-                    delete _misdemeanorTracked[validators[j]];
+                    _deleteIndicator(validators[j]);
                     validators.pop();
                 }
                 // avoid underflow
@@ -254,9 +260,7 @@ contract SlashIndicator is ISlashIndicator, System, IParamSubscriber, IApplicati
             }
             // swap element in array
             if (findLeft && findRight) {
-                delete indicators[validators[i]];
-                delete _lastMisdemeanorCount[validators[i]];
-                delete _misdemeanorTracked[validators[i]];
+                _deleteIndicator(validators[i]);
                 validators[i] = validators[j];
                 validators.pop();
             }

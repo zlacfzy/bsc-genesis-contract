@@ -461,4 +461,117 @@ contract BEP714Test is Test {
         address first = smallSet[0] < smallSet[1] ? smallSet[0] : smallSet[1];
         assertFalse(validators.isCurrentValidator(first));
     }
+
+    function testAutomaticMaintenanceRequiresEnabledMaintenance() public {
+        _param(address(validators), "maxNumOfMaintaining", 0);
+        _miss(members[0], 40);
+        _check(); // BEP-127 semantics: zero disables maintenance, including automatic admission
+        assertTrue(validators.isCurrentValidator(members[0]));
+        _param(address(validators), "maxNumOfMaintaining", 3);
+        _check();
+        assertFalse(validators.isCurrentValidator(members[0]));
+    }
+
+    // Governance changes evaluate the recorded charged boundary against the new threshold.
+    function testLoweredMisdemeanorThresholdChargesUncoveredBoundary() public {
+        address validator = members[0];
+        _param(address(validators), "maxNumOfMaintaining", 0);
+        _miss(validator, 380); // charged at 200
+        (, uint256 charged) = slash.getMaintenanceIndicator(validator);
+        assertEq(charged, 200);
+        _param(address(slash), "misdemeanorThreshold", 150);
+        uint256 income = _deposit(validator);
+        _miss(validator, 1); // 381/150 = 2 > 200/150 = 1: the 300 boundary was never charged
+        assertEq(validators.getIncoming(validator), 0);
+        income = _deposit(validator);
+        _miss(validator, 68); // 449
+        assertEq(validators.getIncoming(validator), income);
+        _miss(validator, 1); // 450
+        assertEq(validators.getIncoming(validator), 0);
+    }
+
+    function testLoweredMisdemeanorThresholdDuringMaintenanceChargesAtExit() public {
+        address validator = members[0];
+        _miss(validator, 180);
+        vm.prank(validator);
+        validators.enterMaintenance();
+        _param(address(slash), "misdemeanorThreshold", 100);
+        _deposit(validator);
+        vm.prank(validator);
+        validators.exitMaintenance(); // zero maintenance increment, total 180
+        assertEq(_count(validator), 180);
+        assertEq(validators.getIncoming(validator), 0);
+    }
+
+    function testRaisedMisdemeanorThresholdChargesUncoveredBoundary() public {
+        address validator = members[0];
+        _param(address(validators), "maxNumOfMaintaining", 0);
+        _miss(validator, 380); // charged at 200
+        _param(address(slash), "misdemeanorThreshold", 300);
+        _deposit(validator);
+        _miss(validator, 1); // 381/300 = 1 > 200/300 = 0
+        assertEq(validators.getIncoming(validator), 0);
+    }
+
+    function testDecayKeepsChargedBoundaryBelowCount() public {
+        address validator = members[0];
+        _param(address(validators), "maxNumOfMaintaining", 0);
+        _miss(validator, 399); // charged at 200
+        vm.prank(address(validators));
+        slash.clean();
+        (uint256 count, uint256 charged) = slash.getMaintenanceIndicator(validator);
+        assertEq(count, 249);
+        assertEq(charged, 200); // not clamped: still below the decayed count
+        uint256 income = _deposit(validator);
+        _miss(validator, 150); // 399
+        assertEq(validators.getIncoming(validator), income);
+        _miss(validator, 1); // 400
+        assertEq(validators.getIncoming(validator), 0);
+    }
+
+    function testCleanCompactsTrackingWithIndicators() public {
+        _param(address(validators), "maxNumOfMaintaining", 0);
+        _miss(members[0], 300); // survives: decays to 150, charged clamps 200 -> 150
+        _miss(members[1], 50); // removed by the swap branch
+        _miss(members[2], 250); // survives: decays to 100, charged clamps 200 -> 100
+        _miss(members[3], 30); // removed by the pop branch
+        vm.prank(address(validators));
+        slash.clean();
+        (uint256 count, uint256 charged) = slash.getMaintenanceIndicator(members[0]);
+        assertEq(count, 150);
+        assertEq(charged, 150);
+        (count, charged) = slash.getMaintenanceIndicator(members[2]);
+        assertEq(count, 100);
+        assertEq(charged, 100);
+        for (uint256 i = 1; i < 4; i += 2) {
+            (, uint256 stored, bool exists) = slash.indicators(members[i]);
+            assertEq(stored, 0);
+            assertFalse(exists);
+            (count, charged) = slash.getMaintenanceIndicator(members[i]);
+            assertEq(count, 0);
+            assertEq(charged, 0);
+        }
+        assertEq(slash.validators(0), members[0]);
+        assertEq(slash.validators(1), members[2]);
+        vm.expectRevert();
+        slash.validators(2);
+        _miss(members[1], 1); // a removed record restarts from scratch
+        assertEq(_count(members[1]), 1);
+    }
+
+    function testForcedExitFelonyResetsCount() public {
+        address validator = members[0];
+        _miss(validator, 40);
+        _check();
+        _advanceMaintenance(validator, 560); // total 600
+        uint64[] memory powers = new uint64[](members.length);
+        bytes[] memory votes = new bytes[](members.length);
+        for (uint256 i; i < members.length; ++i) {
+            powers[i] = 1;
+        }
+        vm.prank(PRODUCER);
+        validators.updateValidatorSetV2(members, powers, votes);
+        assertFalse(validators.isCurrentValidator(validator));
+        assertEq(_count(validator), 0);
+    }
 }
