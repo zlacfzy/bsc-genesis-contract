@@ -5,9 +5,7 @@ interface ISlashIndicator {
     function downtimeSlash(address validator, uint256 count, bool shouldRevert) external;
     function sendFelonyPackage(address validator) external;
     function getSlashThresholds() external view returns (uint256, uint256);
+    function getSlashIndicator(address validator) external view returns (uint256, uint256);
     function maintenanceThreshold() external view returns (uint256);
-    function getMaintenanceIndicator(
-        address validator
-    ) external view returns (uint256, uint256);
-    function settleMaintenance(address validator, uint256 count, uint256 chargedCount) external returns (bool);
+    function settleMaintenance(address validator, uint256 count) external;
 }

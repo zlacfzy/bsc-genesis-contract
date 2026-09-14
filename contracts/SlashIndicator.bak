@@ -44,8 +44,11 @@ contract SlashIndicator is ISlashIndicator, System, IParamSubscriber, IApplicati
     uint256 public felonySlashScope;
 
     // BEP-714 Earlier Validator Maintenance
+    // `_lastMisdemeanorCount` is the missed-block count at the last misdemeanor; unset for pre-BEP-714 records.
     uint256 public constant INIT_MAINTENANCE_THRESHOLD = 40;
     uint256 private _maintenanceThreshold;
+    mapping(address => uint256) private _lastMisdemeanorCount;
+    mapping(address => bool) private _misdemeanorTracked;
 
     event validatorSlashed(address indexed validator);
     event indicatorCleaned();
@@ -117,6 +120,7 @@ contract SlashIndicator is ISlashIndicator, System, IParamSubscriber, IApplicati
             return;
         }
         Indicator memory indicator = indicators[validator];
+        (, uint256 chargedCount) = getMaintenanceIndicator(validator);
         if (indicator.exist) {
             ++indicator.count;
         } else {
@@ -126,19 +130,24 @@ contract SlashIndicator is ISlashIndicator, System, IParamSubscriber, IApplicati
         }
         indicator.height = block.number;
         uint256 count = indicator.count;
-        if (count >= felonyThreshold) {
+        bool isFelony = count >= felonyThreshold;
+        bool isMisdemeanor = count / misdemeanorThreshold > chargedCount / misdemeanorThreshold;
+        if (isFelony) {
             indicator.count = 0;
+            chargedCount = 0;
+        } else if (isMisdemeanor) {
+            chargedCount = count;
         }
-        // the validator contract snapshots the count when it enters maintenance below, so store it first
+        // A misdemeanor can synchronously enter maintenance; publish the entry
+        // count and the charged boundary before calling the validator contract.
         indicators[validator] = indicator;
-        if (count >= felonyThreshold) {
+        _lastMisdemeanorCount[validator] = chargedCount;
+        _misdemeanorTracked[validator] = true;
+        if (isFelony) {
             IBSCValidatorSet(VALIDATOR_CONTRACT_ADDR).felony(validator);
-            _downtimeSlash(validator, indicator.count, false);
-        } else if (count % misdemeanorThreshold == 0) {
+            _downtimeSlash(validator, count, false);
+        } else if (isMisdemeanor) {
             IBSCValidatorSet(VALIDATOR_CONTRACT_ADDR).misdemeanor(validator);
-        } else if (count >= maintenanceThreshold()) {
-            // BEP-714: enter maintenance before any economic penalty
-            IBSCValidatorSet(VALIDATOR_CONTRACT_ADDR).tryEnterMaintenance(validator);
         }
         emit validatorSlashed(validator);
     }
@@ -147,15 +156,79 @@ contract SlashIndicator is ISlashIndicator, System, IParamSubscriber, IApplicati
         return _maintenanceThreshold == 0 ? INIT_MAINTENANCE_THRESHOLD : _maintenanceThreshold;
     }
 
-    // Persist the count settled at the end of a maintenance session; zero means the session ended in felony.
-    function settleMaintenance(address validator, uint256 count) external override onlyValidatorContract onlyInit {
-        if (!indicators[validator].exist) {
-            if (count == 0) {
-                return;
+    function getMaintenanceIndicator(
+        address validator
+    ) public view override returns (uint256 count, uint256 chargedCount) {
+        // Private-chain bootstrap may initialize ValidatorSet first. Report no
+        // misses until SlashIndicator is initialized so epoch admission is a no-op.
+        if (misdemeanorThreshold == 0) {
+            return (0, 0);
+        }
+        count = indicators[validator].count;
+        chargedCount = _misdemeanorTracked[validator]
+            ? _lastMisdemeanorCount[validator]
+            : count / misdemeanorThreshold * misdemeanorThreshold;
+    }
+
+    // Settle the combined count of a maintenance session and persist it as the ongoing indicator.
+    // Returns whether the validator contract should apply a misdemeanor.
+    function settleMaintenance(
+        address validator,
+        uint256 count,
+        uint256 chargedCount
+    ) external override onlyValidatorContract onlyInit returns (bool chargeMisdemeanor) {
+        if (count >= felonyThreshold) {
+            // A manual maintenance session can reach felony without ever
+            // acquiring an ordinary indicator. Do not enqueue an empty record.
+            if (!indicators[validator].exist) {
+                return false;
             }
+            count = 0;
+            chargedCount = 0;
+        } else if (count / misdemeanorThreshold > chargedCount / misdemeanorThreshold) {
+            chargeMisdemeanor = true;
+            chargedCount = count;
+        }
+        if (!indicators[validator].exist) {
             validators.push(validator);
         }
         indicators[validator] = Indicator(block.number, count, true);
+        _lastMisdemeanorCount[validator] = chargedCount;
+        _misdemeanorTracked[validator] = true;
+    }
+
+    function _trackMisdemeanor(
+        address validator
+    ) private {
+        (, uint256 chargedCount) = getMaintenanceIndicator(validator);
+        _lastMisdemeanorCount[validator] = chargedCount;
+        _misdemeanorTracked[validator] = true;
+    }
+
+    function _decayMisdemeanor(address validator, uint256 count) private {
+        if (_lastMisdemeanorCount[validator] > count) {
+            _lastMisdemeanorCount[validator] = count;
+        }
+    }
+
+    // Decrease the indicator by felonyThreshold/DECREASE_RATE. Returns false when the
+    // count is too small to survive, in which case the caller removes the record.
+    function _decayIndicator(address validator) private returns (bool) {
+        Indicator memory indicator = indicators[validator];
+        if (indicator.count <= felonyThreshold / DECREASE_RATE) {
+            return false;
+        }
+        _trackMisdemeanor(validator);
+        indicator.count = indicator.count - felonyThreshold / DECREASE_RATE;
+        indicators[validator] = indicator;
+        _decayMisdemeanor(validator, indicator.count);
+        return true;
+    }
+
+    function _deleteIndicator(address validator) private {
+        delete indicators[validator];
+        delete _lastMisdemeanorCount[validator];
+        delete _misdemeanorTracked[validator];
     }
 
     // To prevent validator misbehaving and leaving, do not clean slash record to zero, but decrease by felonyThreshold/DECREASE_RATE .
@@ -170,24 +243,17 @@ contract SlashIndicator is ISlashIndicator, System, IParamSubscriber, IApplicati
             bool findLeft = false;
             bool findRight = false;
             for (; i < j; ++i) {
-                Indicator memory leftIndicator = indicators[validators[i]];
-                if (leftIndicator.count > felonyThreshold / DECREASE_RATE) {
-                    leftIndicator.count = leftIndicator.count - felonyThreshold / DECREASE_RATE;
-                    indicators[validators[i]] = leftIndicator;
-                } else {
+                if (!_decayIndicator(validators[i])) {
                     findLeft = true;
                     break;
                 }
             }
             for (; i <= j; --j) {
-                Indicator memory rightIndicator = indicators[validators[j]];
-                if (rightIndicator.count > felonyThreshold / DECREASE_RATE) {
-                    rightIndicator.count = rightIndicator.count - felonyThreshold / DECREASE_RATE;
-                    indicators[validators[j]] = rightIndicator;
+                if (_decayIndicator(validators[j])) {
                     findRight = true;
                     break;
                 } else {
-                    delete indicators[validators[j]];
+                    _deleteIndicator(validators[j]);
                     validators.pop();
                 }
                 // avoid underflow
@@ -197,7 +263,7 @@ contract SlashIndicator is ISlashIndicator, System, IParamSubscriber, IApplicati
             }
             // swap element in array
             if (findLeft && findRight) {
-                delete indicators[validators[i]];
+                _deleteIndicator(validators[i]);
                 validators[i] = validators[j];
                 validators.pop();
             }
@@ -381,15 +447,19 @@ contract SlashIndicator is ISlashIndicator, System, IParamSubscriber, IApplicati
                 newMisdemeanorThreshold > maintenanceThreshold() && newMisdemeanorThreshold < felonyThreshold,
                 "the misdemeanorThreshold out of range"
             );
+            // Preserve already charged boundaries under the old parameter.
+            // Only validator slashing/maintenance can enqueue these records;
+            // daily clean removes zero/decayed counts. Historical sets may still
+            // be represented, so this is not capped at the current set's size.
+            for (uint256 i; i < validators.length; ++i) {
+                _trackMisdemeanor(validators[i]);
+            }
             misdemeanorThreshold = newMisdemeanorThreshold;
         } else if (Memory.compareStrings(key, "maintenanceThreshold")) {
             require(value.length == 32, "length of maintenanceThreshold mismatch");
-            uint256 newMaintenanceThreshold = BytesToTypes.bytesToUint256(32, value);
-            require(
-                newMaintenanceThreshold > 0 && newMaintenanceThreshold < misdemeanorThreshold,
-                "the maintenanceThreshold out of range"
-            );
-            _maintenanceThreshold = newMaintenanceThreshold;
+            uint256 threshold = BytesToTypes.bytesToUint256(32, value);
+            require(threshold > 0 && threshold < misdemeanorThreshold, "the maintenanceThreshold out of range");
+            _maintenanceThreshold = threshold;
         } else if (Memory.compareStrings(key, "felonyThreshold")) {
             require(value.length == 32, "length of felonyThreshold mismatch");
             uint256 newFelonyThreshold = BytesToTypes.bytesToUint256(32, value);
@@ -424,7 +494,7 @@ contract SlashIndicator is ISlashIndicator, System, IParamSubscriber, IApplicati
     }
 
     /*----------------- query api -----------------*/
-    function getSlashIndicator(address validator) external view override returns (uint256, uint256) {
+    function getSlashIndicator(address validator) external view returns (uint256, uint256) {
         Indicator memory indicator = indicators[validator];
         return (indicator.height, indicator.count);
     }

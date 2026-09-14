@@ -91,7 +91,7 @@ contract BSCValidatorSet is IBSCValidatorSet, System, IParamSubscriber, IApplica
         // BEP-126 Fast Finality
         bytes voteAddress;
         // reserve for future use
-        // slots[0]: BEP-714 maintenance entry snapshot, see `_enterMaintenance`
+        // slots[0..1]: BEP-714 maintenance entry snapshot, see `_enterMaintenance`
         uint256[19] slots;
     }
 
@@ -527,16 +527,6 @@ contract BSCValidatorSet is IBSCValidatorSet, System, IParamSubscriber, IApplica
     }
 
     /**
-     * @dev Enter maintenance without penalty once the missed-block count reached `maintenanceThreshold`. refer to https://github.com/bnb-chain/BEPs/blob/master/BEPs/BEP-714.md
-     */
-    function tryEnterMaintenance(address validator) external override onlySlash initValidatorExtraSet {
-        uint256 index = currentValidatorSetMap[validator];
-        if (index > 0 && canEnterMaintenance(index - 1)) {
-            _enterMaintenance(validator, index - 1);
-        }
-    }
-
-    /**
      * @dev Evict a validator from the active set.
      * @notice Idempotent: safe to call multiple times for the same validator. If the
      * validator is not in `currentValidatorSetMap` (already evicted, or the supplied
@@ -566,9 +556,48 @@ contract BSCValidatorSet is IBSCValidatorSet, System, IParamSubscriber, IApplica
 
     /*----------------- For Temporary Maintenance -----------------*/
     /**
+     * @dev Enter maintenance for working validators whose missed-block count reached `maintenanceThreshold`.
+     * Called by Parlia at the end of each epoch, after daily settlement. refer to https://github.com/bnb-chain/BEPs/blob/master/BEPs/BEP-714.md
+     */
+    function checkMaintenance() external onlyCoinbase onlyZeroGasPrice onlyInit initValidatorExtraSet {
+        address[] memory validators = getValidators();
+        // Admission is capacity-limited, so use the same address order on every client.
+        for (uint256 i = 1; i < validators.length; ++i) {
+            address validator = validators[i];
+            uint256 j = i;
+            while (j > 0 && validators[j - 1] > validator) {
+                validators[j] = validators[j - 1];
+                --j;
+            }
+            validators[j] = validator;
+        }
+        uint256 threshold = ISlashIndicator(SLASH_CONTRACT_ADDR).maintenanceThreshold();
+        uint256 workingValidatorCount = validators.length;
+        for (uint256 i; i < validators.length; ++i) {
+            if (workingValidatorCount <= 1) {
+                break;
+            }
+            uint256 index = currentValidatorSetMap[validators[i]] - 1;
+            if (!_canEnterMaintenance(index)) {
+                continue;
+            }
+            (uint256 count,) = ISlashIndicator(SLASH_CONTRACT_ADDR).getMaintenanceIndicator(validators[i]);
+            if (count >= threshold) {
+                _enterMaintenance(validators[i], index);
+                --workingValidatorCount;
+            }
+        }
+    }
+
+    /**
      * @notice Return whether the validator at index could enter maintenance
      */
     function canEnterMaintenance(uint256 index) public view returns (bool) {
+        return _canEnterMaintenance(index) && getValidators().length > 1; // - 6. check num of remaining working validators
+    }
+
+    // checks 0-5 of canEnterMaintenance; checkMaintenance tracks the working count itself instead of rescanning for check 6
+    function _canEnterMaintenance(uint256 index) private view returns (bool) {
         if (index >= currentValidatorSet.length) {
             return false;
         }
@@ -580,7 +609,6 @@ contract BSCValidatorSet is IBSCValidatorSet, System, IParamSubscriber, IApplica
                 || !isWorkingValidator(index) // - 3. check if not working(not jailed and not maintaining)
                 || validatorExtraSet[index].enterMaintenanceHeight > 0 // - 5. check if has Maintained during current 24-hour period
                     // current validators are selected every 24 hours(from 00:00:00 UTC to 23:59:59 UTC)
-                || getValidators().length <= 1 // - 6. check num of remaining working validators
         ) {
             return false;
         }
@@ -1039,9 +1067,11 @@ contract BSCValidatorSet is IBSCValidatorSet, System, IParamSubscriber, IApplica
     }
 
     function _enterMaintenance(address validator, uint256 index) private {
-        // BEP-714: snapshot the missed-block count; sessions that predate the upgrade keep the reserved word at zero
-        (, uint256 count) = ISlashIndicator(SLASH_CONTRACT_ADDR).getSlashIndicator(validator);
+        (uint256 count, uint256 chargedCount) = ISlashIndicator(SLASH_CONTRACT_ADDR).getMaintenanceIndicator(validator);
+        // Use reserved words without changing the ValidatorExtra array stride.
+        // Zero marks a legacy session that predates BEP-714.
         validatorExtraSet[index].slots[0] = count.add(1);
+        validatorExtraSet[index].slots[1] = chargedCount;
         ++numOfMaintaining;
         validatorExtraSet[index].isMaintaining = true;
         validatorExtraSet[index].enterMaintenanceHeight = block.number;
@@ -1066,11 +1096,17 @@ contract BSCValidatorSet is IBSCValidatorSet, System, IParamSubscriber, IApplica
         uint256 slashCount = block.number.sub(validatorExtraSet[index].enterMaintenanceHeight).div(miningValidatorCount)
             .div(maintainSlashScale);
 
-        // BEP-714: add the count snapshot taken at entry; zero marks a session that predates the upgrade
+        // BEP-714: add the entry snapshot and settle the combined count; zero marks a legacy session
         uint256 entryCountPlusOne = validatorExtraSet[index].slots[0];
-        uint256 entryCount = entryCountPlusOne == 0 ? 0 : entryCountPlusOne - 1;
-        slashCount = slashCount.add(entryCount);
-        delete validatorExtraSet[index].slots[0];
+        bool chargeMisdemeanor;
+        if (entryCountPlusOne != 0) {
+            slashCount = slashCount.add(entryCountPlusOne - 1);
+            chargeMisdemeanor = ISlashIndicator(SLASH_CONTRACT_ADDR).settleMaintenance(
+                validator, slashCount, validatorExtraSet[index].slots[1]
+            );
+            delete validatorExtraSet[index].slots[0];
+            delete validatorExtraSet[index].slots[1];
+        }
 
         // step 2: clear isMaintaining info
         validatorExtraSet[index].isMaintaining = false;
@@ -1080,20 +1116,11 @@ contract BSCValidatorSet is IBSCValidatorSet, System, IParamSubscriber, IApplica
             ISlashIndicator(SLASH_CONTRACT_ADDR).getSlashThresholds();
         isFelony = false;
         if (slashCount >= felonyThreshold) {
-            if (entryCountPlusOne != 0) {
-                ISlashIndicator(SLASH_CONTRACT_ADDR).settleMaintenance(validator, 0);
-            }
             _felony(validator, index);
             ISlashIndicator(SLASH_CONTRACT_ADDR).downtimeSlash(validator, slashCount, shouldRevert);
             isFelony = true;
-        } else {
-            if (entryCountPlusOne != 0) {
-                ISlashIndicator(SLASH_CONTRACT_ADDR).settleMaintenance(validator, slashCount);
-            }
-            // ordinary slashing has charged every multiple of misdemeanorThreshold up to the entry count
-            if (slashCount / misdemeanorThreshold > entryCount / misdemeanorThreshold) {
-                _misdemeanor(validator);
-            }
+        } else if (entryCountPlusOne == 0 ? slashCount >= misdemeanorThreshold : chargeMisdemeanor) {
+            _misdemeanor(validator);
         }
 
         emit validatorExitMaintenance(validator);
