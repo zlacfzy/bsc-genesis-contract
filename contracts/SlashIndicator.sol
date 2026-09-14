@@ -43,7 +43,8 @@ contract SlashIndicator is ISlashIndicator, System, IParamSubscriber, IApplicati
 
     uint256 public felonySlashScope;
 
-    // BEP-714. Append storage to preserve existing indicators and governance values.
+    // BEP-714 Earlier Validator Maintenance
+    // `_lastMisdemeanorCount` is the missed-block count at the last misdemeanor; unset for pre-BEP-714 records.
     uint256 public constant INIT_MAINTENANCE_THRESHOLD = 40;
     uint256 private _maintenanceThreshold;
     mapping(address => uint256) private _lastMisdemeanorCount;
@@ -169,6 +170,8 @@ contract SlashIndicator is ISlashIndicator, System, IParamSubscriber, IApplicati
             : count / misdemeanorThreshold * misdemeanorThreshold;
     }
 
+    // Settle the combined count of a maintenance session and persist it as the ongoing indicator.
+    // Returns whether the validator contract should apply a misdemeanor.
     function settleMaintenance(
         address validator,
         uint256 count,

@@ -90,7 +90,8 @@ contract BSCValidatorSet is IBSCValidatorSet, System, IParamSubscriber, IApplica
         bool isMaintaining;
         // BEP-126 Fast Finality
         bytes voteAddress;
-        // reserve for future use; slots[0..1] hold the BEP-714 maintenance entry snapshot
+        // reserve for future use
+        // slots[0..1]: BEP-714 maintenance entry snapshot, see `_enterMaintenance`
         uint256[19] slots;
     }
 
@@ -554,7 +555,10 @@ contract BSCValidatorSet is IBSCValidatorSet, System, IParamSubscriber, IApplica
     }
 
     /*----------------- For Temporary Maintenance -----------------*/
-    // BEP-714: called by Parlia at the end of each epoch, after daily settlement.
+    /**
+     * @dev Enter maintenance for working validators whose missed-block count reached `maintenanceThreshold`.
+     * Called by Parlia at the end of each epoch, after daily settlement. refer to https://github.com/bnb-chain/BEPs/blob/master/BEPs/BEP-714.md
+     */
     function checkMaintenance() external onlyCoinbase onlyZeroGasPrice onlyInit initValidatorExtraSet {
         address[] memory validators = getValidators();
         // Admission is capacity-limited, so use the same address order on every client.
@@ -589,11 +593,10 @@ contract BSCValidatorSet is IBSCValidatorSet, System, IParamSubscriber, IApplica
      * @notice Return whether the validator at index could enter maintenance
      */
     function canEnterMaintenance(uint256 index) public view returns (bool) {
-        return _canEnterMaintenance(index) && getValidators().length > 1;
+        return _canEnterMaintenance(index) && getValidators().length > 1; // - 6. check num of remaining working validators
     }
 
-    // Epoch admission maintains the working count locally instead of rescanning
-    // the full set for each validator. Other callers use canEnterMaintenance.
+    // checks 0-5 of canEnterMaintenance; checkMaintenance tracks the working count itself instead of rescanning for check 6
     function _canEnterMaintenance(uint256 index) private view returns (bool) {
         if (index >= currentValidatorSet.length) {
             return false;
@@ -1093,6 +1096,7 @@ contract BSCValidatorSet is IBSCValidatorSet, System, IParamSubscriber, IApplica
         uint256 slashCount = block.number.sub(validatorExtraSet[index].enterMaintenanceHeight).div(miningValidatorCount)
             .div(maintainSlashScale);
 
+        // BEP-714: add the entry snapshot and settle the combined count; zero marks a legacy session
         uint256 entryCountPlusOne = validatorExtraSet[index].slots[0];
         bool chargeMisdemeanor;
         if (entryCountPlusOne != 0) {
