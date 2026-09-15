@@ -137,7 +137,7 @@ contract SlashIndicator is ISlashIndicator, System, IParamSubscriber, IApplicati
             _downtimeSlash(validator, indicator.count, false);
         } else if (count % misdemeanorThreshold == 0) {
             IBSCValidatorSet(VALIDATOR_CONTRACT_ADDR).misdemeanor(validator);
-        } else if (count >= maintenanceThreshold()) {
+        } else if (count == maintenanceThreshold()) {
             // BEP-714: enter maintenance before any economic penalty
             IBSCValidatorSet(VALIDATOR_CONTRACT_ADDR).tryEnterMaintenance(validator);
         }

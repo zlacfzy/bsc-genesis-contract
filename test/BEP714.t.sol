@@ -170,7 +170,7 @@ contract BEP714Test is Test {
         assertEq(_count(validator), 40);
     }
 
-    function testCapacityIsGrantedInArrivalOrderAndRetried() public {
+    function testCapacityIsCheckedAtTheThresholdMissOnly() public {
         for (uint256 i; i < 4; ++i) {
             _miss(members[i], 40);
         }
@@ -178,11 +178,11 @@ contract BEP714Test is Test {
             assertFalse(validators.isCurrentValidator(members[i]));
         }
         assertTrue(validators.isCurrentValidator(members[3])); // capacity 3
-        _miss(members[3], 5);
-        assertTrue(validators.isCurrentValidator(members[3]));
-        assertEq(_count(members[3]), 45);
         _exit(members[0]);
-        _miss(members[3], 1); // retried on the next miss once capacity is free
+        _miss(members[3], 159); // no retry after the threshold miss, even with capacity free
+        assertTrue(validators.isCurrentValidator(members[3]));
+        assertEq(_count(members[3]), 199);
+        _miss(members[3], 1); // the misdemeanor path at 200 remains the next automatic entry
         assertFalse(validators.isCurrentValidator(members[3]));
         _miss(members[0], 1); // once per day
         assertTrue(validators.isCurrentValidator(members[0]));
@@ -193,8 +193,10 @@ contract BEP714Test is Test {
         _miss(members[0], 40);
         assertTrue(validators.isCurrentValidator(members[0])); // BEP-127: zero disables maintenance
         _param(address(validators), "maxNumOfMaintaining", 3);
-        _miss(members[0], 1);
-        assertFalse(validators.isCurrentValidator(members[0]));
+        _miss(members[0], 1); // the threshold miss has passed; no retry
+        assertTrue(validators.isCurrentValidator(members[0]));
+        _miss(members[1], 40);
+        assertFalse(validators.isCurrentValidator(members[1]));
     }
 
     function testAutomaticMaintenancePreservesLastWorkingValidator() public {
@@ -344,9 +346,9 @@ contract BEP714Test is Test {
         _forceDailyUpdate();
         assertEq(_count(validator), 50); // 200 - 600 / 4
         uint256 income = _deposit(validator);
-        _miss(validator, 1); // 51 >= 40 and the daily allowance was reset
+        _miss(validator, 1); // 51: no boundary and no threshold miss
         assertEq(validators.getIncoming(validator), income);
-        assertFalse(validators.isCurrentValidator(validator));
+        assertTrue(validators.isCurrentValidator(validator));
     }
 
     function testTwoSessionsAcrossDailyBoundary() public {
@@ -355,8 +357,10 @@ contract BEP714Test is Test {
         _advanceMaintenance(validator, 160);
         _forceDailyUpdate(); // 200 settled and charged, then decayed to 50
         _deposit(validator);
-        _miss(validator, 1); // 51: admitted again, snapshot overwritten
-        assertFalse(validators.isCurrentValidator(validator));
+        _miss(validator, 1); // 51: past the threshold, so only a manual entry is available today
+        assertTrue(validators.isCurrentValidator(validator));
+        vm.prank(validator);
+        validators.enterMaintenance(); // snapshot overwritten with 51
         _advanceMaintenance(validator, 149); // 51 + 149 = 200 crosses a boundary again after decay
         _exit(validator);
         assertEq(_count(validator), 200);
