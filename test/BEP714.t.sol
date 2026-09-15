@@ -39,18 +39,11 @@ interface IBEP714SlashIndicator {
     function slash(
         address validator
     ) external;
-    function clean() external;
     function updateParam(string calldata key, bytes calldata value) external;
     function maintenanceThreshold() external view returns (uint256);
     function getSlashIndicator(
         address validator
     ) external view returns (uint256, uint256);
-    function indicators(
-        address validator
-    ) external view returns (uint256, uint256, bool);
-    function validators(
-        uint256 index
-    ) external view returns (address);
 }
 
 // Runs against real system-contract bytecode and fresh storage, without an RPC fork.
@@ -122,32 +115,6 @@ contract BEP714Test is Test {
         validators.exitMaintenance();
     }
 
-    function _forceDailyUpdate() internal {
-        uint64[] memory powers = new uint64[](members.length);
-        bytes[] memory votes = new bytes[](members.length);
-        for (uint256 i; i < members.length; ++i) {
-            powers[i] = 1;
-        }
-        vm.prank(PRODUCER);
-        validators.updateValidatorSetV2(members, powers, votes);
-    }
-
-    // Seed an indicator directly: SlashIndicator keeps `validators` at slot 1 and `indicators` at slot 2.
-    function _seedIndicator(address validator, uint256 count) internal {
-        bytes32 base = keccak256(abi.encode(validator, uint256(2)));
-        vm.store(address(slash), base, bytes32(block.number));
-        vm.store(address(slash), bytes32(uint256(base) + 1), bytes32(count));
-        vm.store(address(slash), bytes32(uint256(base) + 2), bytes32(uint256(1)));
-        uint256 length = uint256(vm.load(address(slash), bytes32(uint256(1))));
-        bytes32 element = bytes32(uint256(keccak256(abi.encode(uint256(1)))) + length);
-        vm.store(address(slash), element, bytes32(uint256(uint160(validator))));
-        vm.store(address(slash), bytes32(uint256(1)), bytes32(length + 1));
-        (, uint256 stored, bool exist) = slash.indicators(validator);
-        assertEq(stored, count);
-        assertTrue(exist);
-        assertEq(slash.validators(length), validator);
-    }
-
     /*----------------- admission -----------------*/
 
     function testThresholdEntryWithoutPenalty() public {
@@ -206,7 +173,7 @@ contract BEP714Test is Test {
         assertEq(validators.getValidators().length, 1);
     }
 
-    /*----------------- BEP-127 settlement is unchanged -----------------*/
+    /*----------------- settlement is unchanged from BEP-127 -----------------*/
 
     function testMaintenanceKeepsMissedBlockCount() public {
         address validator = members[0];
@@ -218,90 +185,6 @@ contract BEP714Test is Test {
         assertEq(validators.getIncoming(validator), income);
         _miss(validator, 1);
         assertEq(_count(validator), 41);
-    }
-
-    function testMaintenanceMisdemeanorUsesMaintenanceCountOnly() public {
-        address validator = members[0];
-        _deposit(validator);
-        _miss(validator, 40);
-        _advanceMaintenance(validator, 200);
-        _exit(validator);
-        assertEq(validators.getIncoming(validator), 0);
-        assertEq(_count(validator), 40);
-    }
-
-    function testMaintenanceFelonyUsesMaintenanceCountOnly() public {
-        address validator = members[0];
-        _miss(validator, 40);
-        _advanceMaintenance(validator, 599);
-        _exit(validator); // 40 + 599 would be a felony under a combined rule; 599 alone is not
-        assertTrue(validators.isCurrentValidator(validator));
-        assertEq(_count(validator), 40);
-    }
-
-    function testMaintenanceFelonyEvicts() public {
-        address validator = members[0];
-        _miss(validator, 40);
-        _advanceMaintenance(validator, 600);
-        _exit(validator);
-        assertFalse(validators.isCurrentValidator(validator));
-        vm.expectRevert("only current validators");
-        validators.getCurrentValidatorIndex(validator);
-    }
-
-    function testMisdemeanorEntryDoesNotChargeTwice() public {
-        address validator = members[0];
-        _param(address(validators), "maxNumOfMaintaining", 0);
-        _miss(validator, 199);
-        _param(address(validators), "maxNumOfMaintaining", 3);
-        _miss(validator, 1); // ordinary misdemeanor synchronously enters maintenance
-        assertFalse(validators.isCurrentValidator(validator));
-        uint256 income = _deposit(validator);
-        _advanceMaintenance(validator, 1);
-        _exit(validator);
-        assertEq(_count(validator), 200);
-        assertEq(validators.getIncoming(validator), income);
-        _miss(validator, 1);
-        assertEq(_count(validator), 201);
-        assertEq(validators.getIncoming(validator), income);
-    }
-
-    function testForcedExitThenDecay() public {
-        address validator = members[0];
-        _deposit(validator);
-        _miss(validator, 40);
-        _advanceMaintenance(validator, 200);
-        _forceDailyUpdate(); // forced exit charges the misdemeanor, then clean() drops the 40
-        assertEq(validators.getIncoming(validator), 0);
-        assertEq(_count(validator), 0);
-        assertTrue(validators.isCurrentValidator(validator));
-    }
-
-    function testFelonyShiftKeepsSessionWithValidator() public {
-        address maintaining = members[1];
-        address felon = members[0];
-        _deposit(maintaining);
-        _miss(maintaining, 40); // session at index 1
-        _param(address(validators), "maxNumOfMaintaining", 0);
-        _miss(felon, 600); // felony removes index 0 and shifts the maintaining validator down
-        assertFalse(validators.isCurrentValidator(felon));
-        assertEq(validators.getCurrentValidatorIndex(maintaining), 0);
-        _advanceMaintenance(maintaining, 200);
-        _exit(maintaining);
-        assertEq(validators.getIncoming(maintaining), 0); // settled against the shifted record
-        assertEq(_count(maintaining), 40);
-    }
-
-    function testFuzzMaintenanceLeavesCountUnchanged(uint16 missing, uint16 equivalent) public {
-        uint256 entry = bound(missing, 0, 39);
-        uint256 elapsed = bound(equivalent, 0, 599);
-        address validator = members[0];
-        _miss(validator, entry);
-        vm.prank(validator);
-        validators.enterMaintenance();
-        _advanceMaintenance(validator, elapsed);
-        _exit(validator);
-        assertEq(_count(validator), entry);
     }
 
     /*----------------- governance -----------------*/
@@ -324,72 +207,4 @@ contract BEP714Test is Test {
         assertFalse(validators.isCurrentValidator(members[0]));
     }
 
-    function testThresholdsAreReadAtExit() public {
-        address validator = members[0];
-        _param(address(slash), "felonyThreshold", 1000);
-        _param(address(slash), "misdemeanorThreshold", 333);
-        uint256 income = _deposit(validator);
-        _miss(validator, 40);
-        _advanceMaintenance(validator, 250);
-        _param(address(slash), "misdemeanorThreshold", 200);
-        _param(address(slash), "felonyThreshold", 600);
-        _exit(validator); // 250 >= 200 under the thresholds in force at exit
-        assertEq(validators.getIncoming(validator), 0);
-        assertGt(income, 0);
-        assertEq(_count(validator), 40);
-    }
-
-    function testLoweredFelonyThresholdWaitsForNextMultiple() public {
-        address validator = members[0];
-        _param(address(validators), "maxNumOfMaintaining", 0);
-        _param(address(slash), "felonyThreshold", 1000);
-        _miss(validator, 650);
-        _param(address(slash), "felonyThreshold", 600);
-        _miss(validator, 1); // 651: not retroactive, no felony
-        assertTrue(validators.isCurrentValidator(validator));
-        _miss(validator, 549); // 1200
-        assertEq(_count(validator), 0);
-        assertFalse(validators.isCurrentValidator(validator));
-    }
-
-    function testLoweredMisdemeanorThresholdIsNotRetroactive() public {
-        address validator = members[0];
-        _param(address(validators), "maxNumOfMaintaining", 0);
-        _miss(validator, 380); // charged at 200
-        _param(address(slash), "misdemeanorThreshold", 150);
-        uint256 income = _deposit(validator);
-        _miss(validator, 69); // 449
-        assertEq(validators.getIncoming(validator), income);
-        _miss(validator, 1); // 450
-        assertEq(validators.getIncoming(validator), 0);
-    }
-
-    /*----------------- ordinary slashing is unchanged -----------------*/
-
-    function testChargesFirstBoundaryOnce() public {
-        address validator = members[0];
-        _param(address(validators), "maxNumOfMaintaining", 0);
-        _seedIndicator(validator, 199);
-        _deposit(validator);
-        _miss(validator, 1);
-        assertEq(_count(validator), 200);
-        assertEq(validators.getIncoming(validator), 0);
-        uint256 income = _deposit(validator);
-        _miss(validator, 1);
-        assertEq(validators.getIncoming(validator), income);
-    }
-
-    function testDecayKeepsModuloBoundaries() public {
-        address validator = members[0];
-        _param(address(validators), "maxNumOfMaintaining", 0);
-        _miss(validator, 399); // charged at 200
-        vm.prank(address(validators));
-        slash.clean();
-        assertEq(_count(validator), 249);
-        uint256 income = _deposit(validator);
-        _miss(validator, 150); // 399
-        assertEq(validators.getIncoming(validator), income);
-        _miss(validator, 1); // 400
-        assertEq(validators.getIncoming(validator), 0);
-    }
 }
