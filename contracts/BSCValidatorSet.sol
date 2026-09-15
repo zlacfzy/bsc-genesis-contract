@@ -91,7 +91,6 @@ contract BSCValidatorSet is IBSCValidatorSet, System, IParamSubscriber, IApplica
         // BEP-126 Fast Finality
         bytes voteAddress;
         // reserve for future use
-        // slots[0]: BEP-714 maintenance entry snapshot, see `_enterMaintenance`
         uint256[19] slots;
     }
 
@@ -1050,9 +1049,6 @@ contract BSCValidatorSet is IBSCValidatorSet, System, IParamSubscriber, IApplica
     }
 
     function _enterMaintenance(address validator, uint256 index) private {
-        // BEP-714: snapshot the missed-block count; sessions that predate the upgrade keep the reserved word at zero
-        (, uint256 count) = ISlashIndicator(SLASH_CONTRACT_ADDR).getSlashIndicator(validator);
-        validatorExtraSet[index].slots[0] = count.add(1);
         ++numOfMaintaining;
         validatorExtraSet[index].isMaintaining = true;
         validatorExtraSet[index].enterMaintenanceHeight = block.number;
@@ -1077,11 +1073,10 @@ contract BSCValidatorSet is IBSCValidatorSet, System, IParamSubscriber, IApplica
         uint256 slashCount = block.number.sub(validatorExtraSet[index].enterMaintenanceHeight).div(miningValidatorCount)
             .div(maintainSlashScale);
 
-        // BEP-714: add the count snapshot taken at entry; zero marks a session that predates the upgrade
-        uint256 entryCountPlusOne = validatorExtraSet[index].slots[0];
-        uint256 entryCount = entryCountPlusOne == 0 ? 0 : entryCountPlusOne - 1;
+        // BEP-714: ordinary slashing skips maintaining validators and daily decay runs after the forced
+        // exits, so the current count is the count at entry
+        (, uint256 entryCount) = ISlashIndicator(SLASH_CONTRACT_ADDR).getSlashIndicator(validator);
         slashCount = slashCount.add(entryCount);
-        delete validatorExtraSet[index].slots[0];
 
         // step 2: clear isMaintaining info
         validatorExtraSet[index].isMaintaining = false;
@@ -1091,16 +1086,12 @@ contract BSCValidatorSet is IBSCValidatorSet, System, IParamSubscriber, IApplica
             ISlashIndicator(SLASH_CONTRACT_ADDR).getSlashThresholds();
         isFelony = false;
         if (slashCount >= felonyThreshold) {
-            if (entryCountPlusOne != 0) {
-                ISlashIndicator(SLASH_CONTRACT_ADDR).settleMaintenance(validator, 0);
-            }
+            ISlashIndicator(SLASH_CONTRACT_ADDR).settleMaintenance(validator, 0);
             _felony(validator, index);
             ISlashIndicator(SLASH_CONTRACT_ADDR).downtimeSlash(validator, slashCount, shouldRevert);
             isFelony = true;
         } else {
-            if (entryCountPlusOne != 0) {
-                ISlashIndicator(SLASH_CONTRACT_ADDR).settleMaintenance(validator, slashCount);
-            }
+            ISlashIndicator(SLASH_CONTRACT_ADDR).settleMaintenance(validator, slashCount);
             // ordinary slashing has charged every multiple of misdemeanorThreshold up to the entry count
             // since the last reset, so only a newly entered interval is charged here
             if (slashCount / misdemeanorThreshold > entryCount / misdemeanorThreshold) {

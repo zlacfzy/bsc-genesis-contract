@@ -312,21 +312,6 @@ contract BEP714Test is Test {
         slash.validators(0);
     }
 
-    function testLegacySessionKeepsIndependentAccounting() public {
-        address validator = members[0];
-        uint256 income = _deposit(validator);
-        _miss(validator, 40);
-        uint256 index = validators.getCurrentValidatorIndex(validator);
-        // ValidatorExtra array at slot 11, stride 22 words, reserved words start at offset 3.
-        uint256 entrySlot = uint256(keccak256(abi.encode(uint256(11)))) + index * 22 + 3;
-        assertEq(uint256(vm.load(address(validators), bytes32(entrySlot))), 41);
-        vm.store(address(validators), bytes32(entrySlot), bytes32(0)); // a session that predates the upgrade
-        _advanceMaintenance(validator, 160);
-        _exit(validator);
-        assertEq(_count(validator), 40);
-        assertEq(validators.getIncoming(validator), income); // 160 < 200, not 40 + 160
-    }
-
     function testFuzzMaintenanceCount(uint16 missing, uint16 equivalent) public {
         uint256 entry = bound(missing, 0, 39);
         uint256 elapsed = bound(equivalent, 0, 599 - entry);
@@ -360,25 +345,25 @@ contract BEP714Test is Test {
         _miss(validator, 1); // 51: past the threshold, so only a manual entry is available today
         assertTrue(validators.isCurrentValidator(validator));
         vm.prank(validator);
-        validators.enterMaintenance(); // snapshot overwritten with 51
+        validators.enterMaintenance(); // second session enters at 51
         _advanceMaintenance(validator, 149); // 51 + 149 = 200 crosses a boundary again after decay
         _exit(validator);
         assertEq(_count(validator), 200);
         assertEq(validators.getIncoming(validator), 0);
     }
 
-    function testFelonyShiftKeepsSnapshotWithValidator() public {
+    function testFelonyShiftKeepsSessionWithValidator() public {
         address maintaining = members[1];
         address felon = members[0];
         _deposit(maintaining);
-        _miss(maintaining, 40); // snapshot stored at index 1
+        _miss(maintaining, 40); // session at index 1
         _param(address(validators), "maxNumOfMaintaining", 0);
         _miss(felon, 600); // felony removes index 0 and shifts the maintaining validator down
         assertFalse(validators.isCurrentValidator(felon));
         assertEq(validators.getCurrentValidatorIndex(maintaining), 0);
         _advanceMaintenance(maintaining, 160);
         _exit(maintaining);
-        assertEq(_count(maintaining), 200); // 40 + 160, the snapshot moved with the record
+        assertEq(_count(maintaining), 200); // 40 + 160, settled against the shifted record
         assertEq(validators.getIncoming(maintaining), 0);
     }
 

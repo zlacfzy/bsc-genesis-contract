@@ -125,22 +125,17 @@ contract SlashIndicator is ISlashIndicator, System, IParamSubscriber, IApplicati
             validators.push(validator);
         }
         indicator.height = block.number;
-        uint256 count = indicator.count;
-        bool isFelony = count % felonyThreshold == 0;
-        if (isFelony) {
+        if (indicator.count % felonyThreshold == 0) {
             indicator.count = 0;
-        }
-        // the validator contract snapshots the count when it enters maintenance below, so store it first
-        indicators[validator] = indicator;
-        if (isFelony) {
             IBSCValidatorSet(VALIDATOR_CONTRACT_ADDR).felony(validator);
             _downtimeSlash(validator, indicator.count, false);
-        } else if (count % misdemeanorThreshold == 0) {
+        } else if (indicator.count % misdemeanorThreshold == 0) {
             IBSCValidatorSet(VALIDATOR_CONTRACT_ADDR).misdemeanor(validator);
-        } else if (count == maintenanceThreshold()) {
+        } else if (indicator.count == maintenanceThreshold()) {
             // BEP-714: enter maintenance before any economic penalty
             IBSCValidatorSet(VALIDATOR_CONTRACT_ADDR).tryEnterMaintenance(validator);
         }
+        indicators[validator] = indicator;
         emit validatorSlashed(validator);
     }
 
