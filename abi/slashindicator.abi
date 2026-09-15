@@ -728,24 +728,6 @@
   },
   {
     "type": "function",
-    "name": "settleMaintenance",
-    "inputs": [
-      {
-        "name": "validator",
-        "type": "address",
-        "internalType": "address"
-      },
-      {
-        "name": "count",
-        "type": "uint256",
-        "internalType": "uint256"
-      }
-    ],
-    "outputs": [],
-    "stateMutability": "nonpayable"
-  },
-  {
-    "type": "function",
     "name": "slash",
     "inputs": [
       {

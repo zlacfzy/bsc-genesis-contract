@@ -125,22 +125,38 @@ contract SlashIndicator is ISlashIndicator, System, IParamSubscriber, IApplicati
             validators.push(validator);
         }
         indicator.height = block.number;
-        if (indicator.count % felonyThreshold == 0) {
+        uint256 count = indicator.count;
+        bool isFelony = count % felonyThreshold == 0;
+        if (isFelony) {
             indicator.count = 0;
+        }
+        // the validator contract snapshots the count when it enters maintenance below, so store it first
+        indicators[validator] = indicator;
+        if (isFelony) {
             IBSCValidatorSet(VALIDATOR_CONTRACT_ADDR).felony(validator);
             _downtimeSlash(validator, indicator.count, false);
-        } else if (indicator.count % misdemeanorThreshold == 0) {
+        } else if (count % misdemeanorThreshold == 0) {
             IBSCValidatorSet(VALIDATOR_CONTRACT_ADDR).misdemeanor(validator);
-        } else if (indicator.count == maintenanceThreshold()) {
+        } else if (count == maintenanceThreshold()) {
             // BEP-714: enter maintenance before any economic penalty
             IBSCValidatorSet(VALIDATOR_CONTRACT_ADDR).tryEnterMaintenance(validator);
         }
-        indicators[validator] = indicator;
         emit validatorSlashed(validator);
     }
 
-    function maintenanceThreshold() public view returns (uint256) {
+    function maintenanceThreshold() public view override returns (uint256) {
         return _maintenanceThreshold == 0 ? INIT_MAINTENANCE_THRESHOLD : _maintenanceThreshold;
+    }
+
+    // Persist the count settled at the end of a maintenance session; zero means the session ended in felony.
+    function settleMaintenance(address validator, uint256 count) external override onlyValidatorContract onlyInit {
+        if (!indicators[validator].exist) {
+            if (count == 0) {
+                return;
+            }
+            validators.push(validator);
+        }
+        indicators[validator] = Indicator(block.number, count, true);
     }
 
     // To prevent validator misbehaving and leaving, do not clean slash record to zero, but decrease by felonyThreshold/DECREASE_RATE .
@@ -409,7 +425,7 @@ contract SlashIndicator is ISlashIndicator, System, IParamSubscriber, IApplicati
     }
 
     /*----------------- query api -----------------*/
-    function getSlashIndicator(address validator) external view returns (uint256, uint256) {
+    function getSlashIndicator(address validator) external view override returns (uint256, uint256) {
         Indicator memory indicator = indicators[validator];
         return (indicator.height, indicator.count);
     }
